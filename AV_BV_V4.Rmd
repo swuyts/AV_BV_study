@@ -1,0 +1,1050 @@
+---
+title: "AV-BV analysis Runs 1 and 2"
+author: "Sander Wuyts"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+# Introduction
+
+Analysis of the AV BV data from Runs 1 and 2 (V4 region). Prior to this analysis, the samples were processed using the DADA2 software.
+
+**Note**: Due to the fact that samplenames were renamed when uploading to ENA, one will not be able to rerun this analysis 'out of the box'. This script will probably need several adaptions to conform with these new samplenames. Therefore, this analysis is uploaded more as guideline or an in depth methods section and not as an out of the box reproducible analysis. In the future, I will avoid this and try to create a reproducible script from the beginning of the project. Apologies!
+
+The data for this study is derived from 3 different runs:
+
+- A first run on 07 06 2017 - V4 region
+- A second run on 21 08 2017 - V4 region
+- A third run on xxx - V1V2 region
+
+Only the two first runs were analysed here in this script.
+
+# Setup and themes
+
+```{r}
+#### Theme for publication: http://areshenk-research-notes.com/publication-quality-plots-in-r/ ####
+
+theme_pub <- function (base_size = 12, base_family = "") {
+  theme_grey(base_size = base_size,
+             base_family = base_family) %+replace%
+
+    theme(# Set text size
+      plot.title = element_text(size = 18),
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16,
+                                  angle = 90),
+      axis.text.x = element_text(size = 14,colour="black",element_text(margin = margin(5,0,0,0),
+                                                                       angle = 90)),
+      axis.text.y = element_text(size = 14,colour="black",element_text(margin = margin(0,5,0,0))),
+      strip.text.y = element_text(size = 15,
+                                  angle = -90),
+
+      # Legend text
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 15),
+      legend.background = element_rect(fill = "transparent", colour=NA),
+
+      # Configure lines and axes
+      axis.ticks.x = element_line(colour = "black"),
+      axis.ticks.y = element_line(colour = "black"),
+
+      # Plot background
+      panel.background = element_rect(fill = "transparent",colour=NA),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.background = element_rect(fill="transparent", colour=NA),
+
+      # Facet labels       
+      legend.key = element_blank(),
+      strip.background = element_rect(fill = "transparent",
+                                      colour = NA,
+                                      size = 0.1),
+       panel.border = element_rect(colour = "black", fill="transparent"),
+       strip.text.x = element_text(size=18,face="bold",margin=margin(0,0,5,0))
+      )
+
+}
+
+# Create colour palette for taxonomy plotting
+
+colours <- c("#a6cee3","#1f78b4","#b2df8a","#33a02c","#fb9a99",
+             "#e31a1c","#fdbf6f","#ff7f00","#cab2d6","#6a3d9a",
+             "#ffff99","#b15928","#8BC395","#919D5F","#EB494A",
+             "#F79C5D","#DEB969")
+
+# Other useful function
+
+library(stringr)
+name_otus = function(ps) {
+  
+  otuName = as.character(tax_table(ps)[,"genus"])
+  otuName = str_split_fixed(otuName, "\\(", 2)[,1]
+  names(otuName) = taxa_names(ps)
+  
+  for (level in c("family", "order", "class", "phylum","kingdom")) {
+    uncl = (otuName=="")
+    if (!any(uncl)) break
+    otuName[uncl] = as.character(tax_table(ps)[uncl,level])
+    otuName[uncl] = str_split_fixed(otuName[uncl], "\\(", 2)[,1]
+  }
+  
+  otuName = sub("_[1-9]$", "", otuName) # remove appendices like "_1"
+  otuName = factor(otuName, unique(otuName))
+  otuName = otuName[order(otuName)]
+  
+# Uncomment these lines if you want indices behind name
+  # index = unlist(tapply(names(otuName), otuName, function(x)
+  #  if (length(x)==1) return("") else return(as.character(1:length(x)))
+  #))
+  #otuNameFull = paste(otuName, index, sep=" ")
+  #otuNameFull = sub(" $", "", otuNameFull)
+  #names(otuNameFull) = names(otuName)
+  #return(otuNameFull)
+  
+  return(otuName)
+}
+
+
+# Create distance matrix and reformat for easy plotting
+calculateDistMat <- function(phylo_obj){
+  # Calculate distance matrix
+  dm <- vegdist(otu_table(phylo_obj), method="bray")
+  
+  # Reformat the  to long format matrix
+  m <- data.frame(t(combn(rownames(otu_table(phylo_obj)),2)), as.numeric(dm))
+  names(m) <- c("sample1", "sample2", "distance")
+
+  # Add condition
+  m$condition_sample1 <- str_split_fixed(m$sample1,"_",4)[,1]
+  m$condition_sample2 <- str_split_fixed(m$sample2,"_",4)[,1]
+  
+  # Add condition
+  m$patient_sample1 <- str_split_fixed(m$sample1,"_",4)[,2]
+  m$patient_sample2 <- str_split_fixed(m$sample2,"_",4)[,2]
+  
+  
+  return(m)
+} 
+```
+
+
+# Read in dataframe
+
+These objects were created during DADA2 analysis
+
+```{r}
+library(phyloseq)
+library(vegan)
+library(tidyverse)
+library(ggpubr) # For merging images
+library(ggrepel) # To avoid overlapping of labels on some plots
+
+# Load dfs from run1
+load('taxonTable.Robject')
+load('seqTable.nochim.fil.Robject')
+colnames(taxonTable) <- str_to_lower(colnames(taxonTable))
+
+# Merge into phyloseq object
+ps <- phyloseq(otu_table(as.matrix(seqTable.nochim.fil), taxa_are_rows=FALSE), 
+               tax_table(as.matrix(taxonTable)),
+               sample_data(data.frame(
+                 description = rep(NA, length(row.names(seqTable.nochim.fil))), 
+                 run = rep('Run1', length(row.names(seqTable.nochim.fil))),
+                 row.names = row.names(seqTable.nochim.fil)
+               )))
+
+
+# Load data from run 2
+load('Eline_newdata.Robject')
+
+# Rename samples from second run
+sample_names(Eline) <- str_sub(sample_data(Eline)$description,3,-1)
+
+# merge both phyloseq objects
+ps <- merge_phyloseq(ps, Eline)
+
+ps
+```
+
+This means we found 383 different taxa in this study. Let's have a sneak peak at the first 10 of genusnames of these taxa:
+
+```{r}
+as.character(tax_table(ps)[1:10,6])
+```
+
+Add metadata, which we just derive from the sample names.
+
+```{r}
+condition <- substring(sample_names(ps),1,2)
+patient <- substring(sample_names(ps),3,4)
+
+metadata_Eline <- data.frame(sample_names(ps),condition,patient)
+metadata_Eline$patient <- as.character(metadata_Eline$patient)
+names(metadata_Eline)[1] <- "sample"
+```
+
+There are 5 samples marked as "ns" (not sure) because at the time of sequencing we did not have the right patient information. We do now, so let's rename them. Ns1, ns2, ns3 and ns5 are BV18-BV21, while ns4 is NL20. Let's adapt that here:
+
+```{r}
+rownames(metadata_Eline) <- metadata_Eline$sample
+
+# Change ns1-ns5
+metadata_Eline$condition[c(145:150,153:154)] <- "BV"
+metadata_Eline$patient[c(145:150,153:154)] <- c(18,18,19,19,20,20,21,21)
+
+# Change ns4
+metadata_Eline$condition[151:152] <- "NL"
+metadata_Eline$patient[151:152] <- "20"
+
+
+sample_data(ps)  <- sample_data(metadata_Eline)
+ps_Eline <- ps
+ps_Eline
+```
+
+Merge technical repeats
+
+```{r}
+grouping_factor = apply(sample_data(ps_Eline)[,c(2:3)], 1, paste0,collapse="_")
+psM = merge_samples(ps_Eline, group=grouping_factor)
+psM.sample_data = str_split_fixed(rownames(sample_data(psM)), pattern="_", n=ncol(sample_data(psM))-1)
+rownames(psM.sample_data) = rownames(sample_data(psM))
+colnames(psM.sample_data) = colnames(sample_data(psM))[2:ncol(sample_data(psM))]
+psM.sample_data = data.frame(psM.sample_data)
+sample_data(psM) = sample_data(psM.sample_data)
+
+ps_Eline <- psM
+ps_Eline
+```
+
+Remove samples that that we won't include in this study:
+
+```{r}
+# Remove CA (samples were not part of this study)
+samples_to_keep <- !sample_data(ps_Eline)$condition=="CA"
+ps_Eline <- prune_samples(samples_to_keep,ps_Eline)
+
+# Remove BV03, BV04 and NL08, NL09, AV18, AV15, AV14, AV07
+samples_to_keep <- !row.names(sample_data(ps_Eline))%in%c("BV_03","BV_04","NL_08","NL_09","AV_01", "AV_11", "AV_18", "AV_15", "AV_14", "AV_07")
+ps_Eline <- prune_samples(samples_to_keep,ps_Eline)
+
+# Remove the ones without condition
+samples_to_keep <- !sample_data(ps_Eline)$condition %in% c("15", "16", "36")
+ps_Eline <- prune_samples(samples_to_keep,ps_Eline)
+
+# Remove empty taxa
+ps_Eline <- prune_taxa(taxa_sums(ps_Eline) > 0, ps_Eline)
+
+ps_Eline
+```
+
+
+# Alpha diversity
+
+
+```{r}
+# Calculate richness
+richness <- estimate_richness(ps_Eline,measures=c('Observed','Shannon'))
+richness$Samplename <- row.names(richness)
+
+# Melt/gather
+richness <- richness %>%
+  gather(.,key="DivType",value="Alphadiv", Observed, Shannon) 
+
+# Add rest of metadata
+metadata <- as.data.frame(as.matrix(sample_data(ps_Eline)))
+metadata$Samplename <- row.names(metadata)
+
+# merge
+richness <- merge.data.frame(richness,metadata,all.x=T,by= "Samplename")
+
+# Convert divtype to factor
+richness$DivType <- factor(richness$DivType,levels=c("Observed","Shannon"))
+```
+
+
+Plot alpha diversity 
+
+```{r, fig.width=8,fig.height=4}
+comparisons <- list(c("AV", "BV"), c("BV", "NL"), c("AV", "NL"))
+
+# Obseverd richness
+observed <- richness %>%
+  filter(!is.na(condition)) %>%
+  filter(DivType  == "Observed") %>%
+  mutate(condition = fct_relevel(condition, "NL", "AV", "BV")) %>%
+  ggplot(aes(x=condition, y=Alphadiv)) +
+  geom_jitter(width = 0.09, height = 0, size=2, alpha= 0.7) +
+  theme_pub() +
+  expand_limits(y=0) + 
+  stat_summary(fun.y = mean, geom = "errorbar", aes(ymax = ..y.., ymin = ..y.. ),
+                 width = .76, linetype = "dashed")  +
+  stat_compare_means(aes(label = ..p.adj..), comparisons = comparisons, p.adjust.method = "holm", paired = F) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(margin = margin(8,0,0,0)),
+        axis.title.y = element_text(margin = margin(0,8,0,0)),
+        axis.text.y = element_text(margin = margin(0,8,0,0)),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  ggtitle("Observed richness\n") +
+  ylab("Alpha diversity measure")
+
+# Shannon diversity
+shannon <- richness %>%
+  filter(!is.na(condition)) %>%
+  filter(DivType  == "Shannon") %>%
+  mutate(condition = fct_relevel(condition, "NL", "AV", "BV")) %>%
+  ggplot(aes(x=condition, y=Alphadiv)) +
+  geom_jitter(width = 0.09, height = 0, size=2, alpha= 0.7) +
+  theme_pub() +
+  expand_limits(y=0) + 
+  stat_summary(fun.y = mean, geom = "errorbar", aes(ymax = ..y.., ymin = ..y.. ),
+                 width = .76, linetype = "dashed")  +
+  stat_compare_means(aes(label = ..p.adj..), comparisons = comparisons, p.adjust.method = "holm", paired = F) +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(margin = margin(8,0,0,0)),
+        axis.title.y = element_text(margin = margin(0,8,0,0)),
+        axis.text.y = element_text(margin = margin(0,8,0,0)),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  ggtitle("Shannon diversity\n") +
+  ylab("Alpha diversity measure")
+
+# Arrange in one figure
+ggarrange(observed, shannon,
+          labels = c("A", "B"))
+
+ggsave("Figure1.svg", last_plot(), width = 17.8, height = 10, units = "cm")
+```
+
+Add some statistics. First from the Observed alphadiv estimator
+
+```{r}
+richness_shannon <- richness %>%
+  filter(!is.na(condition)) %>%
+  filter(DivType  == "Observed")
+
+compare_means(Alphadiv ~ condition, p.adjust.method = "holm", data = richness_shannon)
+```
+
+Now also from the Shannon alphadiv estimator
+
+```{r}
+richness_shannon <- richness %>%
+  filter(!is.na(condition)) %>%
+  filter(DivType  == "Shannon")
+
+compare_means(Alphadiv ~ condition, p.adjust.method = "holm", data = richness_shannon)
+```
+
+Report the mean numbers of both estimators for all conditions.
+
+```{r}
+richness %>%
+  filter(!is.na(condition)) %>%
+  group_by(DivType, condition) %>%
+  summarise(mean = mean(Alphadiv))
+```
+
+
+# Beta div
+
+Perform PCoA and plot.
+
+```{r, fig.width=8,fig.height=8}
+# Beta div
+title <- "PCoA (Bray-Curtis distance) \n"
+ordination <- ordinate(ps_Eline,"PCoA","bray")
+p <- plot_ordination(ps_Eline, ordination, color="condition", type = "samples", shape = "condition")
+p <- p + geom_point(size=3) + ggtitle(title)
+p + scale_color_manual(values=colours) +
+  geom_text_repel(mapping= aes(label=patient))
+
+```
+
+Calculate relative abundance and merge taxa that are from the same genus.
+
+```{r}
+# Calculate relative abundance
+ps_Eline_relabun <- transform_sample_counts(ps_Eline,  function(OTU) OTU/sum(OTU))
+ps_Eline_relabun_merged_genus <- tax_glom(ps_Eline_relabun, taxrank = 'genus')
+
+title <- "PCoA (Bray-Curtis distance) \n"
+ordination <- ordinate(ps_Eline_relabun_merged_genus,"PCoA","bray")
+p <- plot_ordination(ps_Eline, ordination, color="condition", type = "samples", shape = "condition")
+p <- p + geom_point(size=3) + ggtitle(title)
+p + scale_color_manual(values=colours) +
+  geom_text_repel(mapping= aes(label=patient))
+```
+
+Calculate a distance matrix and plot difference in Beta diversity.
+
+```{R}
+calculateDistMat(ps_Eline_relabun_merged_genus) %>%
+  filter(condition_sample1 == condition_sample2) %>%
+  ggplot(aes(x=condition_sample1, fill=condition_sample1, y = distance)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_jitter(aes(fill = condition_sample1),  shape = 21, size = 1, width = 0.1) +
+  theme_pub()
+  
+```
+
+
+# Taxonomic composition
+
+
+Let's plot the taxonomic composition of the TOP 20 ASVs.
+
+```{r, fig.width= 5, fig.height=4}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_relabun <- transform_sample_counts(ps_Eline,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_relabun), TRUE)[1:20])
+ps_Eline_relabun_top20 = prune_taxa(top20otus, ps_Eline_relabun)
+
+# Convert phyloseq object into large dataframe to be able to change the order of the stacking
+ps_Eline_relabun_top20df <- psmelt(ps_Eline_relabun_top20)
+
+# Add new column with highest unclassified taxonomic rank
+highest_unclassified_rank <- name_otus(ps_Eline_relabun_top20)
+  # Convert to df
+highest_unclassified_rankdf <- cbind(read.table(text=names(highest_unclassified_rank)),highest_unclassified_rank)
+  # Merge
+ps_Eline_relabun_top20df <- merge(ps_Eline_relabun_top20df,highest_unclassified_rankdf,by.x="OTU",by.y="V1")
+
+# Relevel to get right order in legend
+temp <- unique(ps_Eline_relabun_top20df[order(-ps_Eline_relabun_top20df$Abundance),"highest_unclassified_rank"])
+ps_Eline_relabun_top20df$highest_unclassified_rank <- factor(ps_Eline_relabun_top20df$highest_unclassified_rank, levels=temp)
+
+# Plot using ggplot2, colouring genus
+ggplot(ps_Eline_relabun_top20df[order(ps_Eline_relabun_top20df$Abundance),], aes(x=Sample, y=Abundance, fill=highest_unclassified_rank)) + geom_bar(stat = "identity", color = "black") + 
+  ylab("Relative abundance (%) \n") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.x= element_text(size = 8,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),  
+        legend.position="bottom") +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) +
+  ylim(0,1.2) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F,ncol=3)) +
+  facet_wrap(~condition,scales="free_x")
+```
+
+## AV Only
+
+Prune AV samples only and replot:
+
+```{r}
+samples_to_keep <- sample_data(ps_Eline)$condition=="AV"
+ps_Eline_AV  <- prune_samples(samples_to_keep,ps_Eline)
+```
+
+Add additional metadata: namely the AV scores.
+
+```{r}
+AV_scores <- readxl::read_excel("AVscores.xlsx") %>%
+  filter(!is.na(Avscore)) %>%
+  rename(Sample = sample) %>%
+  mutate(Sample = as_factor(Sample)) %>%
+  mutate(Sample = fct_reorder(Sample, Avscore))
+
+scores <- AV_scores %>%
+  ggplot(aes(x = Sample, y = Avscore)) +
+  geom_col( fill = "black") +
+  theme_pub() +
+  scale_y_continuous() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, colour="black"),
+        legend.position = "bottom", 
+        legend.text = element_text(size = 10),
+        axis.title.y = element_text(size = 8),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill="transparent",color=NA),
+        plot.title = element_blank(),
+        plot.margin = margin(t = 0)) +
+  scale_y_reverse(breaks = c(0, 5, 10)) +
+  xlab('') +
+  ylab("AV score") 
+
+```
+
+Replot the taxonomic composition.
+
+```{r, fig.width= 5, fig.height=4}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_AV_relabun <- transform_sample_counts(ps_Eline_AV,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_AV_relabun), TRUE)[1:20])
+
+# Create new df with highest unclassified rank
+highest_unclassified_rank <- name_otus(ps_Eline_AV_relabun) %>% 
+  as.tibble() %>%
+  rownames_to_column("OTU") %>%
+  rename(highest_unclassified_rank = value) %>%
+  filter(OTU %in% top20otus)
+
+# Merge
+ps_Eline_AV_relabundf <- psmelt(ps_Eline_AV_relabun) %>%
+  left_join(highest_unclassified_rank) %>%
+  mutate(highest_unclassified_rank = as.character(highest_unclassified_rank)) %>%
+  replace_na(list(highest_unclassified_rank = "Residual"))
+
+# Relevel sample factor in dataset to follow the clustering order
+ps_Eline_AV_relabundf <- ps_Eline_AV_relabundf %>% 
+  left_join(AV_scores) %>% 
+  mutate(Sample = fct_reorder(Sample, Avscore))
+
+# Reorder the order of taxnames
+topgenera_AV <- unique(highest_unclassified_rank$highest_unclassified_rank) %>%
+  as.character() %>%
+  c(., "Residual")
+ps_Eline_AV_relabundf$highest_unclassified_rank <- factor(ps_Eline_AV_relabundf$highest_unclassified_rank, level = topgenera_AV)
+
+# Plot using ggplot2
+AV <- ggplot(ps_Eline_AV_relabundf, aes(x=Sample, y=Abundance, fill=highest_unclassified_rank)) + 
+  geom_bar(stat = "identity", color = "black", position = position_stack(reverse = T)) + 
+  ylab("Relative abundance (%)") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.y = element_text(size = 5, colour="black", margin = margin(0,1,0,0)), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_text(size = 5, colour="black", angle = 90, margin = margin(0,0,0,0)),
+        legend.position="bottom", 
+        axis.title.y = element_text(size = 8),
+        panel.border = element_blank(),
+        plot.title = element_text(size = 8),
+        legend.margin = margin(0,-10, 5, 0),
+        legend.box.margin = margin(0,-10, 0 ,-10),
+        legend.text = element_text(size = 6),
+        legend.key.size = unit(6, "pt"),
+        plot.margin = margin(b = 0, t = 5)) +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F, ncol=3)) +
+  ggtitle("AV")
+```
+
+## BV Only
+
+Now, let's prune the BV samples ans study these seperatly.
+
+```{r}
+samples_to_keep <- sample_data(ps_Eline)$condition=="BV"
+ps_Eline_BV  <- prune_samples(samples_to_keep,ps_Eline)
+```
+
+
+```{r, fig.width= 5, fig.height=4}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_BV_relabun <- transform_sample_counts(ps_Eline_BV,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_BV_relabun), TRUE)[1:20])
+
+# Create new df with highest unclassified rank
+highest_unclassified_rank <- name_otus(ps_Eline_BV_relabun) %>% 
+  as.tibble() %>%
+  rownames_to_column("OTU") %>%
+  rename(highest_unclassified_rank = value) %>%
+  filter(OTU %in% top20otus)
+
+# Merge
+ps_Eline_BV_relabundf <- psmelt(ps_Eline_BV_relabun) %>%
+  left_join(highest_unclassified_rank) %>%
+  mutate(highest_unclassified_rank = as.character(highest_unclassified_rank)) %>%
+  replace_na(list(highest_unclassified_rank = "Residual"))
+
+# Cluster on similarity
+clust <- otu_table(ps_Eline_BV_relabun) %>%
+  vegdist(.,method = "bray") %>% # Calculate Bray-Curtis distance matrix
+  hclust(method = "average") # Perform hierarchical clustering
+  
+clustOrder <- clust$labels[clust$order] 
+
+# Relevel sample factor in dataset to follow the clustering order
+ps_Eline_BV_relabundf$Sample <- factor(ps_Eline_BV_relabundf$Sample, level = clustOrder)
+
+# Reorder the order of taxnames
+topgenera_BV <- unique(highest_unclassified_rank$highest_unclassified_rank) %>%
+  as.character() %>%
+  c(., "Residual")
+ps_Eline_BV_relabundf$highest_unclassified_rank <- factor(ps_Eline_BV_relabundf$highest_unclassified_rank, level = topgenera_BV)
+
+# Plot using ggplot2
+BV <- ggplot(ps_Eline_BV_relabundf, aes(x=Sample, y=Abundance, fill=highest_unclassified_rank)) + 
+  geom_bar(stat = "identity", color = "black", position = position_stack(reverse = T)) + 
+  ylab("Relative abundance (%)") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.y = element_text(size = 5, colour="black", margin = margin(0,1,0,0)), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_text(size = 5, colour="black", angle = 90, margin = margin(0,0,0,0)),
+        legend.position="bottom", 
+        axis.title.y = element_text(size = 8),
+        panel.border = element_blank(),
+        legend.margin = margin(-10, 5, 5, -10),
+        legend.box.margin = margin(-10,0, 5 ,-10),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(4, "pt"),
+        plot.title = element_text(size = 8)) +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F, ncol=3)) +
+  ggtitle("BV")
+```
+
+## NL Only
+
+Finally, repeat the analysis for the NL samples again.
+
+```{r}
+samples_to_keep <- sample_data(ps_Eline)$condition=="NL"
+ps_Eline_NL  <- prune_samples(samples_to_keep,ps_Eline)
+```
+
+
+```{r, fig.width= 5, fig.height=4}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_NL_relabun <- transform_sample_counts(ps_Eline_NL,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_NL_relabun), TRUE)[1:20])
+
+# Create new df with highest unclassified rank
+highest_unclassified_rank <- name_otus(ps_Eline_NL_relabun) %>% 
+  as.tibble() %>%
+  rownames_to_column("OTU") %>%
+  rename(highest_unclassified_rank = value) %>%
+  filter(OTU %in% top20otus)
+
+# Merge
+ps_Eline_NL_relabundf <- psmelt(ps_Eline_NL_relabun) %>%
+  left_join(highest_unclassified_rank) %>%
+  mutate(highest_unclassified_rank = as.character(highest_unclassified_rank)) %>%
+  replace_na(list(highest_unclassified_rank = "Residual"))
+
+# Cluster on similarity
+clust <- otu_table(ps_Eline_NL_relabun) %>%
+  vegdist(.,method = "bray") %>% # Calculate Bray-Curtis distance matrix
+  hclust(method = "average") # Perform hierarchical clustering
+  
+clustOrder <- clust$labels[clust$order] 
+
+# Relevel sample factor in dataset to follow the clustering order
+ps_Eline_NL_relabundf$Sample <- factor(ps_Eline_NL_relabundf$Sample, level = clustOrder)
+
+# Reorder the order of taxnames
+topgenera_NL <- unique(highest_unclassified_rank$highest_unclassified_rank) %>%
+  as.character() %>%
+  c(., "Residual")
+ps_Eline_NL_relabundf$highest_unclassified_rank <- factor(ps_Eline_NL_relabundf$highest_unclassified_rank, level = topgenera_NL)
+
+# Plot using ggplot2
+NL <- ggplot(ps_Eline_NL_relabundf, aes(x=Sample, y=Abundance, fill=highest_unclassified_rank)) + 
+  geom_bar(stat = "identity", color = "black", position = position_stack(reverse = T)) + 
+  ylab("Relative abundance (%)") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.y = element_text(size = 5, colour="black", margin = margin(0,1,0,0)), 
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_text(size = 5, colour="black", angle = 90, margin = margin(0,0,0,0)),
+        legend.position="bottom", 
+        axis.title.y = element_text(size = 8),
+        panel.border = element_blank(),
+        legend.margin = margin(-10, 5, 5, -10),
+        legend.box.margin = margin(-10,-10, 5 ,-10),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(4, "pt"),
+        plot.title = element_text(size = 8)) +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F, ncol=3)) +
+  ggtitle("NL")
+
+```
+
+## Merge taxaplots
+
+Merge the different taxaplots together for the publication.
+
+```{r fig.height=12, fig.width=8, message=FALSE, warning=FALSE}
+ggarrange(ggarrange(NL,
+                   BV,
+                   labels = c("A", "B")
+                   ),
+          ggarrange(AV,
+                    scores,
+                    heights = c(2, 0.5),
+                    nrow = 2,
+                    labels = c("C", ""),
+                    align = 'v',
+                    common.legend = T,
+                    legend = "bottom"
+                    ),
+          nrow = 2
+)
+
+ggsave("Figure2.png", width = 11.3, height = 17.8, units = 'cm')
+```
+
+
+# ASV-level analysis
+
+The most prevalent ASVs were also uploaded to EzBioCloud's Identify tool. Let's import that data here:
+
+```{r}
+ASV_table <- readxl::read_excel("asvsAVBVpaper2703.xlsx") %>%
+  mutate(highest_unclassified_rank = str_c(genus, species, sep = " ")) %>%
+  rename(OTU = asv) %>%
+  select(-species) %>%
+  group_by(highest_unclassified_rank) %>%
+  mutate(n_taxa = n()) %>%
+  mutate(taxon_number = ifelse(n_taxa > 1, as.character(1:n()), "")) %>%
+  mutate(taxon_name = paste(highest_unclassified_rank, taxon_number, sep = " ")) %>%
+  ungroup() 
+```
+
+Let's create the AV plot:
+
+```{r message=FALSE, warning=FALSE}
+ps_Eline_AV_relabundf_ASV <-ps_Eline_AV_relabundf %>%
+  select(-highest_unclassified_rank, - genus) %>%
+  left_join(ASV_table) %>%
+  mutate(Include = toupper(Include)) %>%
+  filter(Include == "YES")
+  
+AV_ASV <- ps_Eline_AV_relabundf_ASV %>%
+  ggplot(aes(x=Sample, y=Abundance, fill=taxon_name)) + 
+  geom_bar(stat = "identity", color = "black", position = position_stack(reverse = T)) + 
+  ylab("Relative abundance (%)") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.x= element_text(size = 3,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_blank(),
+        legend.position="none",
+        legend.text = element_text(size = 8, face = "italic"),
+        strip.text.x = element_text(size = 6, face = "bold.italic", margin = margin(t = 0, b = 1)),
+        plot.title = element_text(size = 8)) +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) +
+  ylim(0,1.2) + 
+  guides(fill=guide_legend(byrow=F, 
+                           ncol=3)) +
+  ggtitle("AV") +
+  facet_wrap(~genus, nrow = 4)
+
+E_legend <- ggpubr::get_legend(AV_ASV)
+
+AV_ASV <- AV_ASV + theme(legend.position = "none")
+
+AV_ASV
+```
+
+And now the BV plots
+
+```{r message=FALSE, warning=FALSE}
+ps_Eline_BV_relabundf_ASV <-ps_Eline_BV_relabundf %>%
+  select(-highest_unclassified_rank, - genus) %>%
+  left_join(ASV_table) %>%
+  mutate(Include = toupper(Include)) %>%
+  filter(Include == "YES")
+  
+BV_ASV <- ps_Eline_BV_relabundf_ASV %>%
+  ggplot(aes(x=Sample, y=Abundance, fill=taxon_name)) + 
+  geom_bar(stat = "identity", color = "black", position = position_stack(reverse = T)) + 
+  ylab("Relative abundance (%)") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.x= element_text(size = 3,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_blank(),
+        legend.position="none",
+        legend.text = element_text(size = 2, face = "italic"),
+        strip.text.x = element_text(size = 6, face = "bold.italic", margin = margin(t = 0, b = 1)),
+        plot.title = element_text(size = 8)) +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) +
+  ylim(0,1.2) + 
+  guides(fill=guide_legend(byrow=F, 
+                           ncol=3)) +
+  ggtitle("BV") +
+  facet_wrap(~genus, nrow = 4)
+
+BV_ASV
+```
+
+And finally the NL plots.
+
+```{r message=FALSE, warning=FALSE}
+ps_Eline_NL_relabundf_ASV <-ps_Eline_NL_relabundf %>%
+  select(-highest_unclassified_rank, - genus) %>%
+  left_join(ASV_table) %>%
+  mutate(Include = toupper(Include)) %>%
+  filter(Include == "YES")
+  
+NL_ASV <- ps_Eline_NL_relabundf_ASV %>%
+  ggplot(aes(x=Sample, y=Abundance, fill=taxon_name)) + 
+  geom_bar(stat = "identity", color = "black", position = position_stack(reverse = T)) + 
+  ylab("Relative abundance (%)") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.title.y = element_text(size = 6),
+        axis.ticks.y = element_line(size = 0.2),
+        axis.text.y = element_text(size = 4, margin = margin(l = 2)),
+        axis.text.x= element_text(size = 3,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),  
+        legend.position="none",
+        legend.text = element_text(size = 4, face = "italic", margin = margin(l = 0)),
+        legend.key.size = unit(4, "pt"),
+        legend.box.margin = margin(t = -8),
+        legend.margin = margin(l = 0),
+        strip.text.x = element_text(size = 6, face = "bold.italic", margin = margin(t = 0, b = 1)),
+        plot.title = element_text(size = 8)) +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours,"#FF0000","#000000","#FFFFFF")) +
+  ylim(0,1.2) + 
+  scale_y_continuous(breaks=c(0,0.5,1))+
+  guides(fill=guide_legend(byrow=F, 
+                           ncol=3)) +
+  ggtitle("NL") +
+  facet_wrap(~genus, nrow = 4)
+```
+
+Now, merge all of them together for Figure 3.
+
+```{r fig.height=12, fig.width=8, message=FALSE, warning=FALSE}
+ggarrange(NL_ASV, AV_ASV, BV_ASV,
+          ncol = 3,
+          align = 'h',
+          common.legend = T,
+          legend = "bottom")
+
+ggsave("Figure3.png", width = 11.3, height = 9.5, units = 'cm')
+```
+
+# Additional plots: Heatmap ASV level
+
+## Lactobacillus only
+
+We're always interested in the Lactobacillus ASVs. Let's prune these from the dataset and see which ASVs are shared between conditions and which are not.
+
+```{r, fig.width=10,fig.height=8}
+lactos <- subset_taxa(ps_Eline_relabun, genus=="Lactobacillus")
+lactos <- prune_taxa(taxa_sums(lactos) > 0, lactos)
+lactos <- prune_samples(sample_sums(lactos) > 0, lactos)
+ntaxa(lactos)
+
+plot_heatmap(lactos,"Type",title="RSV heatmap: Lactobacillus only", taxa.label='species') +
+  facet_grid(~condition, scales="free_x", space= "free_x")
+```
+
+Samples that don't have any of these sequences, are dropped. Labels on the left are species names (if classified)
+
+## Gardnerella only
+
+```{r, fig.width=10,fig.height=8}
+gard <- subset_taxa(ps_Eline_relabun, genus=="Gardnerella")
+gard <- prune_taxa(taxa_sums(gard) > 0, gard)
+gard <- prune_samples(sample_sums(gard) > 0, gard)
+ntaxa(gard)
+
+plot_heatmap(gard,"Type",title="RSV heatmap: Gardnerella only", taxa.label='species') + facet_grid(~condition, scales="free_x", space= "free_x")
+```
+
+## Prevotella only
+
+```{r, fig.width=10,fig.height=8}
+gard <- subset_taxa(ps_Eline_relabun, genus=="Prevotella")
+gard <- prune_taxa(taxa_sums(gard) > 0, gard)
+gard <- prune_samples(sample_sums(gard) > 0, gard)
+ntaxa(gard)
+
+plot_heatmap(gard,"Type",title="RSV heatmap: Prevotella only", taxa.label='species') + facet_grid(~condition, scales="free_x", space= "free_x")
+```
+
+
+# Additional plots: Gram positive vs Negative
+
+We were also interested in whether there was a difference between gram + and gram -. Eline manually identified these based on their genus classification.
+
+```{r}
+gram <- read.csv("gramstain_tabel.csv")
+```
+
+## AV Only
+
+Prune AV samples only
+
+```{r}
+samples_to_keep <- sample_data(ps_Eline)$condition=="AV"
+ps_Eline_AV  <- prune_samples(samples_to_keep,ps_Eline)
+```
+
+
+```{r, fig.width=10,fig.height=8}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_AV_relabun <- transform_sample_counts(ps_Eline_AV,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_AV_relabun), TRUE)[1:20])
+ps_Eline_AV_relabun_top20 = prune_taxa(top20otus, ps_Eline_AV_relabun)
+
+# Convert phyloseq object into large dataframe to be able to change the order of the stacking
+ps_Eline_AV_relabun_top20df <- psmelt(ps_Eline_AV_relabun_top20)
+
+# Add new column with highest unclassified taxonomic rank
+highest_unclassified_rank <- name_otus(ps_Eline_AV_relabun_top20)
+  # Convert to df
+highest_unclassified_rankdf <- cbind(read.table(text=names(highest_unclassified_rank)),highest_unclassified_rank)
+  # Merge
+ps_Eline_AV_relabun_top20df <- merge(ps_Eline_AV_relabun_top20df,highest_unclassified_rankdf,by.x="OTU",by.y="V1")
+
+# Relevel to get right order in legend
+temp <- unique(ps_Eline_AV_relabun_top20df[order(-ps_Eline_AV_relabun_top20df$Abundance),"highest_unclassified_rank"])
+ps_Eline_AV_relabun_top20df$highest_unclassified_rank <- factor(ps_Eline_AV_relabun_top20df$highest_unclassified_rank, levels=temp)
+
+# Merge with gram dataset
+ps_Eline_AV_relabun_top20df <- merge.data.frame(ps_Eline_AV_relabun_top20df, gram, by="highest_unclassified_rank",all.x = T)
+
+# Plot using ggplot2, colouring genus
+ggplot(ps_Eline_AV_relabun_top20df[order(ps_Eline_AV_relabun_top20df$Abundance),], aes(x=Sample, y=Abundance, fill=Gram_stain)) + geom_bar(stat = "identity", color = "black") + 
+  ylab("Relative abundance (%) \n") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.x= element_text(size = 8,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),  
+        legend.position="bottom") +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours[1],colours[5])) +
+  ylim(0,1.2) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F,ncol=3)) +
+  facet_wrap(~condition,scales="free_x")
+```
+
+## BV Only
+
+Prune BV samples only
+
+```{r}
+samples_to_keep <- sample_data(ps_Eline)$condition=="BV"
+ps_Eline_BV  <- prune_samples(samples_to_keep,ps_Eline)
+```
+
+
+```{r, fig.width=10,fig.height=8}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_BV_relabun <- transform_sample_counts(ps_Eline_BV,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_BV_relabun), TRUE)[1:20])
+ps_Eline_BV_relabun_top20 = prune_taxa(top20otus, ps_Eline_BV_relabun)
+
+# Convert phyloseq object into large dataframe to be able to change the order of the stacking
+ps_Eline_BV_relabun_top20df <- psmelt(ps_Eline_BV_relabun_top20)
+
+# Add new column with highest unclassified taxonomic rank
+highest_unclassified_rank <- name_otus(ps_Eline_BV_relabun_top20)
+  # Convert to df
+highest_unclassified_rankdf <- cbind(read.table(text=names(highest_unclassified_rank)),highest_unclassified_rank)
+  # Merge
+ps_Eline_BV_relabun_top20df <- merge(ps_Eline_BV_relabun_top20df,highest_unclassified_rankdf,by.x="OTU",by.y="V1")
+
+# Relevel to get right order in legend
+temp <- unique(ps_Eline_BV_relabun_top20df[order(-ps_Eline_BV_relabun_top20df$Abundance),"highest_unclassified_rank"])
+ps_Eline_BV_relabun_top20df$highest_unclassified_rank <- factor(ps_Eline_BV_relabun_top20df$highest_unclassified_rank, levels=temp)
+
+# Merge with gram dataset
+ps_Eline_BV_relabun_top20df <- merge.data.frame(ps_Eline_BV_relabun_top20df, gram, by="highest_unclassified_rank",all.x = T)
+
+# Plot using ggplot2, colouring genus
+ggplot(ps_Eline_BV_relabun_top20df[order(ps_Eline_BV_relabun_top20df$Abundance),], aes(x=Sample, y=Abundance, fill=Gram_stain)) + geom_bar(stat = "identity", color = "black") + 
+  ylab("Relative abundance (%) \n") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.x= element_text(size = 8,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),  
+        legend.position="bottom") +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours[1],colours[5])) +
+  ylim(0,1.2) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F,ncol=3)) +
+  facet_wrap(~condition,scales="free_x")
+```
+
+## NL Only
+
+Prune NL samples only
+
+```{r}
+samples_to_keep <- sample_data(ps_Eline)$condition=="NL"
+ps_Eline_NL  <- prune_samples(samples_to_keep,ps_Eline)
+```
+
+
+```{r, fig.width=10,fig.height=8}
+# Taxonomic composition
+# Calculate relative abundance
+ps_Eline_NL_relabun <- transform_sample_counts(ps_Eline_NL,  function(OTU) OTU/sum(OTU))
+
+# Calculate top 20 OTUs
+top20otus = names(sort(taxa_sums(ps_Eline_NL_relabun), TRUE)[1:20])
+ps_Eline_NL_relabun_top20 = prune_taxa(top20otus, ps_Eline_NL_relabun)
+
+# Convert phyloseq object into large dataframe to be able to change the order of the stacking
+ps_Eline_NL_relabun_top20df <- psmelt(ps_Eline_NL_relabun_top20)
+
+# Add new column with highest unclassified taxonomic rank
+highest_unclassified_rank <- name_otus(ps_Eline_NL_relabun_top20)
+  # Convert to df
+highest_unclassified_rankdf <- cbind(read.table(text=names(highest_unclassified_rank)),highest_unclassified_rank)
+  # Merge
+ps_Eline_NL_relabun_top20df <- merge(ps_Eline_NL_relabun_top20df,highest_unclassified_rankdf,by.x="OTU",by.y="V1")
+
+# Relevel to get right order in legend
+temp <- unique(ps_Eline_NL_relabun_top20df[order(-ps_Eline_NL_relabun_top20df$Abundance),"highest_unclassified_rank"])
+ps_Eline_NL_relabun_top20df$highest_unclassified_rank <- factor(ps_Eline_NL_relabun_top20df$highest_unclassified_rank, levels=temp)
+
+# Merge with gram dataset
+ps_Eline_NL_relabun_top20df <- merge.data.frame(ps_Eline_NL_relabun_top20df, gram, by="highest_unclassified_rank",all.x = T)
+
+# Plot using ggplot2, colouring genus
+ggplot(ps_Eline_NL_relabun_top20df[order(ps_Eline_NL_relabun_top20df$Abundance),], aes(x=Sample, y=Abundance, fill=Gram_stain)) + geom_bar(stat = "identity", color = "black") + 
+  ylab("Relative abundance (%) \n") + 
+  xlab("") +
+  theme_pub() +
+  theme(axis.text.x= element_text(size = 8,colour="black",angle=90), 
+        axis.ticks.x=element_blank(),  
+        legend.position="bottom") +
+  labs(fill="") + 
+  scale_fill_manual(values = c(colours[1],colours[5])) +
+  ylim(0,1.2) + 
+  scale_y_continuous(breaks=c(0,0.25,0.5,0.75,1))+
+  guides(fill=guide_legend(byrow=F,ncol=3)) +
+  facet_wrap(~condition,scales="free_x")
+```
